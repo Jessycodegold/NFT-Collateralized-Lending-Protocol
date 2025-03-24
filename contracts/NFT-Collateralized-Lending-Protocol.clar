@@ -339,3 +339,81 @@ l,
     )
   )
 )
+
+;; Finalize an appraisal (private helper)
+(define-private (finalize-appraisal (request-id uint))
+  (let (
+    (request (unwrap! (map-get? appraisal-requests { request-id: request-id }) err-asset-not-found))
+    (appraisals (get appraisals request))
+  )
+    ;; Calculate median value from all appraisals
+    (let (
+      (values-list (map get-value-from-appraisal appraisals))
+      (median-value (get-median values-list))
+      (collection-id (get collection-id request))
+      (token-id (get token-id request))
+    )
+      ;; Update the request with final value
+      (map-set appraisal-requests
+        { request-id: request-id }
+        (merge request {
+          status: "completed",
+          final-value: (some median-value)
+        })
+      )
+      
+      ;; Update the NFT asset with new appraisal
+      (update-asset-appraisal collection-id token-id median-value appraisals)
+      
+      (ok {
+        collection-id: collection-id,
+        token-id: token-id,
+        value: median-value
+      })
+    )
+  )
+)
+
+;; Helper to get value from appraisal
+(define-private (get-value-from-appraisal (appraisal { appraiser: principal, value: uint, timestamp: uint }))
+  (get value appraisal)
+)
+
+;; Calculate median of a list of values
+(define-private (get-median (values (list 10 uint)))
+  (let (
+    (sorted-values (sort values))
+    (len (len values))
+    (middle (/ len u2))
+  )
+    (if (is-eq (mod len u2) u0)
+      ;; Even number of values, take average of middle two
+      (let (
+        (val1 (unwrap-panic (element-at sorted-values middle)))
+        (val2 (unwrap-panic (element-at sorted-values (- middle u1))))
+      )
+        (/ (+ val1 val2) u2)
+      )
+      ;; Odd number of values, take middle one
+      (unwrap-panic (element-at sorted-values middle))
+    )
+  )
+)
+
+;; Helper to sort a list of values (simple bubble sort)
+(define-private (sort (values (list 10 uint)))
+  (fold sorter values values)
+)
+
+;; Helper for sorting algorithm
+(define-private (sorter (i uint) (values (list 10 uint)))
+  (fold (lambda (j acc) (bubble j acc)) values values)
+)
+
+;; Bubble sort helper
+(define-private (bubble (val1 uint) (values (list 10 uint)))
+  (match (bubble-helper val1 values u0 (len values))
+    result result
+    values
+  )
+)
