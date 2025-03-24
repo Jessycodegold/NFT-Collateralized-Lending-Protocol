@@ -702,3 +702,14 @@ l,
     
     ;; Validate borrower is the loan's borrower
     (asserts! (is-eq borrower (get borrower loan)) err-not-authorized)
+     ;; Process accrued interest
+    (let (
+      (updated-loan (accrue-interest loan-id))
+      (remaining (get remaining-amount updated-loan))
+      (repay-amount (if (> amount remaining) remaining amount))
+    )
+      ;; Ensure borrower has enough tokens
+      (asserts! (>= (ft-get-balance lending-token borrower) repay-amount) err-insufficient-funds)
+      
+      ;; Transfer tokens from borrower to contract
+      (try! (ft-transfer? lending-token repay-amount borrower (as-contract tx-sender)))
