@@ -79,3 +79,81 @@
     collection-id: (string-ascii 32)
   }
 )
+
+l,
+    collection-id: (string-ascii 32),
+    token-id: uint,
+    loan-amount: uint,
+    interest-rate: uint, ;; Annual rate in basis points
+    origination-fee: uint,
+    start-block: uint,
+    duration: uint, ;; In blocks
+    end-block: uint,
+    collateral-value: uint,
+    loan-to-value: uint, ;; In basis points
+    state: uint, ;; 0=Active, 1=Repaid, 2=Defaulted, 3=Liquidated, 4=Expired
+    repaid-amount: uint,
+    remaining-amount: uint,
+    liquidation-trigger: uint, ;; LTV threshold for liquidation in basis points
+    last-interest-accrual: uint,
+    lenders: (list 10 { lender: principal, amount: uint, share: uint })
+  }
+)
+
+;; NFT collateral locked in the protocol
+(define-map locked-collateral
+  { loan-id: uint }
+  {
+    collection-id: (string-ascii 32),
+    token-id: uint,
+    owner: principal
+  }
+)
+
+;; Borrower history for risk assessment
+(define-map borrower-history
+  { borrower: principal }
+  {
+    total-loans: uint,
+    active-loans: uint,
+    repaid-loans: uint,
+    defaulted-loans: uint,
+    total-borrowed: uint,
+    current-debt: uint,
+    first-loan-date: uint,
+    last-activity: uint,
+    risk-score: uint ;; 0-100, higher is riskier
+  }
+)
+
+;; Liquidation Auctions
+(define-map auctions
+  { auction-id: uint }
+  {
+    loan-id: uint,
+    collection-id: (string-ascii 32),
+    token-id: uint,
+    starting-price: uint,
+    reserve-price: uint,
+    current-bid: uint,
+    current-bidder: (optional principal),
+    start-block: uint,
+    end-block: uint,
+    state: uint, ;; 0=Active, 1=Ended, 2=Settled
+    original-owner: principal,
+    debt-amount: uint,
+    bids: (list 20 { bidder: principal, amount: uint, timestamp: uint })
+  }
+)
+
+;; Authorized Appraisers (Oracles)
+(define-map authorized-appraisers
+  { appraiser: principal }
+  {
+    authorized: bool,
+    appraisal-count: uint,
+    collections: (list 20 (string-ascii 32)),
+    accuracy-score: uint, ;; 0-100, higher is better
+    last-active: uint
+  }
+)
