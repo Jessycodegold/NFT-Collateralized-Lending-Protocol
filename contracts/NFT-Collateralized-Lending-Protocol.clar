@@ -339,3 +339,377 @@ l,
     )
   )
 )
+
+;; Finalize an appraisal (private helper)
+(define-private (finalize-appraisal (request-id uint))
+  (let (
+    (request (unwrap! (map-get? appraisal-requests { request-id: request-id }) err-asset-not-found))
+    (appraisals (get appraisals request))
+  )
+    ;; Calculate median value from all appraisals
+    (let (
+      (values-list (map get-value-from-appraisal appraisals))
+      (median-value (get-median values-list))
+      (collection-id (get collection-id request))
+      (token-id (get token-id request))
+    )
+      ;; Update the request with final value
+      (map-set appraisal-requests
+        { request-id: request-id }
+        (merge request {
+          status: "completed",
+          final-value: (some median-value)
+        })
+      )
+      
+      ;; Update the NFT asset with new appraisal
+      (update-asset-appraisal collection-id token-id median-value appraisals)
+      
+      (ok {
+        collection-id: collection-id,
+        token-id: token-id,
+        value: median-value
+      })
+    )
+  )
+)
+
+;; Helper to get value from appraisal
+(define-private (get-value-from-appraisal (appraisal { appraiser: principal, value: uint, timestamp: uint }))
+  (get value appraisal)
+)
+
+;; Calculate median of a list of values
+(define-private (get-median (values (list 10 uint)))
+  (let (
+    (sorted-values (sort values))
+    (len (len values))
+    (middle (/ len u2))
+  )
+    (if (is-eq (mod len u2) u0)
+      ;; Even number of values, take average of middle two
+      (let (
+        (val1 (unwrap-panic (element-at sorted-values middle)))
+        (val2 (unwrap-panic (element-at sorted-values (- middle u1))))
+      )
+        (/ (+ val1 val2) u2)
+      )
+      ;; Odd number of values, take middle one
+      (unwrap-panic (element-at sorted-values middle))
+    )
+  )
+)
+
+;; Helper to sort a list of values (simple bubble sort)
+(define-private (sort (values (list 10 uint)))
+  (fold sorter values values)
+)
+
+;; Helper for sorting algorithm
+(define-private (sorter (i uint) (values (list 10 uint)))
+  (fold (lambda (j acc) (bubble j acc)) values values)
+)
+
+;; Bubble sort helper
+(define-private (bubble (val1 uint) (values (list 10 uint)))
+  (match (bubble-helper val1 values u0 (len values))
+    result result
+    values
+  )
+)
+
+;; Bubble sort implementation
+(define-private (bubble-helper (val uint) (values (list 10 uint)) (index uint) (len uint))
+  (if (>= index (- len u1))
+    values
+    (let (
+      (next-val (default-to u0 (element-at values (+ index u1))))
+    )
+      (if (> val next-val)
+        (bubble-helper val (swap-at values index (+ index u1)) (+ index u1) len)
+        (bubble-helper val values (+ index u1) len)
+      )
+    )
+  )
+)
+
+;; Helper to swap elements in a list
+(define-private (swap-at (values (list 10 uint)) (i uint) (j uint))
+  (let (
+    (val-i (unwrap-panic (element-at values i)))
+    (val-j (unwrap-panic (element-at values j)))
+  )
+    (replace-at (replace-at values i val-j) j val-i)
+  )
+)
+
+;; Update NFT asset appraisal data
+(define-private (update-asset-appraisal
+  (collection-id (string-ascii 32))
+  (token-id uint)
+  (value uint)
+  (appraisals (list 10 { appraiser: principal, value: uint, timestamp: uint })))
+  
+  (let (
+    (asset (map-get? nft-assets { collection-id: collection-id, token-id: token-id }))
+    (rarity-score (if (is-some asset) 
+                     (get rarity-score (unwrap-panic asset)) 
+                     (calculate-rarity-score collection-id token-id)))
+    (rarity-rank (if (is-some asset)
+                    (get rarity-rank (unwrap-panic asset))
+                    u1))
+    (traits (if (is-some asset)
+               (get traits (unwrap-panic asset))
+               (list)))
+    (appraisal-count (if (is-some asset)
+                        (+ (get appraisal-count (unwrap-panic asset)) u1)
+                        u1))
+    (appraisal-history (if (is-some asset)
+                          (get appraisal-history (unwrap-panic asset))
+                          (list)))
+    ;; Take the most recent 3 appraisals including this one
+    (new-history (take u3 (append appraisal-history {
+                           value: value,
+                           timestamp: block-height,
+                           appraiser: tx-sender
+                         })))
+  )
+    (map-set nft-assets
+      { collection-id: collection-id, token-id: token-id }
+      {
+        current-appraisal: value,
+        rarity-score: rarity-score,
+        rarity-rank: rarity-rank,
+        traits: traits,
+        last-appraisal-date: block-height,
+        appraisal-count: appraisal-count,
+        appraisal-history: new-history,
+        collection-id: collection-id
+      }
+    )
+    
+    true
+  )
+)
+
+;; Calculate rarity score for an NFT (simplified version)
+(define-private (calculate-rarity-score (collection-id (string-ascii 32)) (token-id uint))
+  ;; In a real implementation, this would analyze trait distributions
+  ;; For this example, we'll return a fixed score between 30-85
+  (let (
+    (pseudorandom-source (sha256 (concat (to-consensus-buff collection-id) 
+                                        (to-consensus-buff token-id))))
+    (first-byte (unwrap-panic (element-at pseudorandom-source u0)))
+  )
+    (+ u30 (mod first-byte u55))
+  )
+)
+
+;; Apply for a loan against an NFT
+(define-public (apply-for-loan
+  (collection-id (string-ascii 32))
+  (token-id uint)
+  (loan-amount uint)
+  (duration uint))
+  
+  (let (
+    (borrower tx-sender)
+    (loan-id (var-get next-loan-id))
+    (collection (unwrap! (map-get? collections { collection-id: collection-id }) err-collection-not-found))
+    (asset (unwrap! (map-get? nft-assets { collection-id: collection-id, token-id: token-id }) err-asset-not-found))
+    (nft-contract (get contract collection))
+    (nft-value (get current-appraisal asset))
+    (max-ltv (get max-ltv collection))
+    (requested-ltv (/ (* loan-amount u10000) nft-value))
+  )
+    ;; Validation checks
+    (asserts! (get enabled collection) err-collection-not-found)
+    (asserts! (>= nft-value loan-amount) err-insufficient-collateral)
+    (asserts! (<= requested-ltv max-ltv) err-insufficient-collateral)
+    (asserts! (>= duration (var-get min-loan-duration)) err-invalid-parameter)
+    (asserts! (<= duration (var-get max-loan-duration)) err-invalid-parameter)
+    
+    ;; Verify NFT ownership
+    (asserts! (is-owner nft-contract token-id borrower) err-not-nft-owner)
+    
+    ;; Calculate loan parameters
+    (let (
+      (ltv requested-ltv)
+      (interest-rate (calculate-interest-rate collection asset ltv))
+      (origination-fee (/ (* loan-amount (var-get protocol-fee-percentage)) u10000))
+      (liquidation-trigger (/ (* (var-get liquidation-threshold) max-ltv) u10000))
+    )
+      ;; Transfer NFT to contract
+      (try! (transfer-nft nft-contract token-id borrower (as-contract tx-sender)))
+      
+      ;; Create the loan
+      (map-set loans
+        { loan-id: loan-id }
+        {
+          borrower: borrower,
+          collection-id: collection-id,
+          token-id: token-id,
+          loan-amount: loan-amount,
+          interest-rate: interest-rate,
+          origination-fee: origination-fee,
+          start-block: block-height,
+          duration: duration,
+          end-block: (+ block-height duration),
+          collateral-value: nft-value,
+          loan-to-value: ltv,
+          state: u0, ;; Active
+          repaid-amount: u0,
+          remaining-amount: loan-amount,
+          liquidation-trigger: liquidation-trigger,
+          last-interest-accrual: block-height,
+          lenders: (list)
+        }
+      )
+      
+      ;; Record the collateral as locked
+      (map-set locked-collateral
+        { loan-id: loan-id }
+        {
+          collection-id: collection-id,
+          token-id: token-id,
+          owner: borrower
+        }
+      )
+      
+      ;; Update borrower history
+      (update-borrower-history borrower loan-amount true)
+      
+      ;; Increment loan ID
+      (var-set next-loan-id (+ loan-id u1))
+      
+      ;; Transfer loan amount to borrower minus fees
+      (as-contract (try! (ft-transfer? lending-token (- loan-amount origination-fee) (as-contract tx-sender) borrower)))
+      
+      ;; Transfer fees to treasury
+      (as-contract (try! (ft-transfer? lending-token origination-fee (as-contract tx-sender) (var-get treasury-address))))
+      
+      (ok loan-id)
+    )
+  )
+)
+
+;; Helper to check NFT ownership
+(define-private (is-owner (nft-contract principal) (token-id uint) (owner principal))
+  ;; In a real implementation, this would query the NFT contract
+  ;; For simplicity, returning true
+  true
+)
+
+;; Helper to transfer NFT
+(define-private (transfer-nft (nft-contract principal) (token-id uint) (sender principal) (recipient principal))
+  ;; In a real implementation, this would call the NFT contract's transfer function
+  ;; For simplicity, returning ok
+  (ok true)
+)
+
+;; Calculate interest rate based on collateral quality and LTV
+(define-private (calculate-interest-rate
+  (collection (tuple contract: principal, base-uri: (string-utf8 256), max-ltv: uint, min-interest-rate: uint, max-interest-rate: uint, interest-rate-model: (string-ascii 10), rarity-levels: (list 10 (string-ascii 20)), min-value: uint, max-value: uint, enabled: bool))
+  (asset (tuple current-appraisal: uint, rarity-score: uint, rarity-rank: uint, traits: (list 20 { trait-type: (string-ascii 32), value: (string-utf8 64) }), last-appraisal-date: uint, appraisal-count: uint, appraisal-history: (list 10 { value: uint, timestamp: uint, appraiser: principal }), collection-id: (string-ascii 32)))
+  (ltv uint))
+  
+  (let (
+    (min-rate (get min-interest-rate collection))
+    (max-rate (get max-interest-rate collection))
+    (max-ltv (get max-ltv collection))
+    (rarity-score (get rarity-score asset))
+    (model (get interest-rate-model collection))
+    
+    ;; Rarity adjustment factor (higher rarity = lower interest)
+    (rarity-factor (/ (* (- u100 rarity-score) u1000) u100))
+    
+    ;; LTV factor (higher LTV = higher interest)
+    (ltv-factor (/ (* ltv u1000) max-ltv))
+  )
+    (if (is-eq model "linear")
+      ;; Linear model: min + (max - min) * ltv/maxLtv - rarityAdjustment
+      (let (
+        (range (- max-rate min-rate))
+        (ltv-component (/ (* range ltv-factor) u1000))
+        (rarity-adjustment (/ (* range rarity-factor) u1000))
+        (final-rate (+ min-rate ltv-component (- rarity-adjustment)))
+      )
+        ;; Ensure within bounds
+        (if (< final-rate min-rate)
+          min-rate
+          (if (> final-rate max-rate)
+            max-rate
+            final-rate
+          )
+        )
+      )
+      ;; Default to exponential model
+      (let (
+        (base-rate min-rate)
+        (ltv-exponent (/ ltv u2000)) ;; 0.5 power for exponential curve
+        (rarity-discount (/ (* (- max-rate min-rate) rarity-factor) u1000))
+        (final-rate (+ base-rate (/ (* (- max-rate min-rate) ltv-exponent) u1) (- rarity-discount)))
+      )
+        ;; Ensure within bounds
+        (if (< final-rate min-rate)
+          min-rate
+          (if (> final-rate max-rate)
+            max-rate
+            final-rate
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Update borrower history
+(define-private (update-borrower-history (borrower principal) (amount uint) (is-new-loan bool))
+  (let (
+    (existing (default-to {
+                total-loans: u0,
+                active-loans: u0,
+                repaid-loans: u0,
+                defaulted-loans: u0,
+                total-borrowed: u0,
+                current-debt: u0,
+                first-loan-date: block-height,
+                last-activity: block-height,
+                risk-score: u50
+              } (map-get? borrower-history { borrower: borrower })))
+  )
+    (map-set borrower-history
+      { borrower: borrower }
+      (merge existing {
+        total-loans: (if is-new-loan (+ (get total-loans existing) u1) (get total-loans existing)),
+        active-loans: (if is-new-loan (+ (get active-loans existing) u1) (get active-loans existing)),
+        total-borrowed: (+ (get total-borrowed existing) amount),
+        current-debt: (+ (get current-debt existing) amount),
+        last-activity: block-height
+      })
+    )
+  )
+)
+
+;; Repay a loan (full or partial)
+(define-public (repay-loan (loan-id uint) (amount uint))
+  (let (
+    (borrower tx-sender)
+    (loan (unwrap! (map-get? loans { loan-id: loan-id }) err-loan-not-found))
+  )
+    ;; Validate loan is active
+    (asserts! (is-eq (get state loan) u0) err-invalid-loan-state)
+    
+    ;; Validate borrower is the loan's borrower
+    (asserts! (is-eq borrower (get borrower loan)) err-not-authorized)
+     ;; Process accrued interest
+    (let (
+      (updated-loan (accrue-interest loan-id))
+      (remaining (get remaining-amount updated-loan))
+      (repay-amount (if (> amount remaining) remaining amount))
+    )
+      ;; Ensure borrower has enough tokens
+      (asserts! (>= (ft-get-balance lending-token borrower) repay-amount) err-insufficient-funds)
+      
+      ;; Transfer tokens from borrower to contract
+      (try! (ft-transfer? lending-token repay-amount borrower (as-contract tx-sender)))
