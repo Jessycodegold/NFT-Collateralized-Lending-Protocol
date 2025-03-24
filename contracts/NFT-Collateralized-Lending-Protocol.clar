@@ -157,3 +157,185 @@ l,
     last-active: uint
   }
 )
+
+;; Appraisal history
+(define-map appraisal-requests
+  { request-id: uint }
+  {
+    collection-id: (string-ascii 32),
+    token-id: uint,
+    requestor: principal,
+    timestamp: uint,
+    status: (string-ascii 10), ;; "pending", "completed", "rejected"
+    appraisals: (list 10 { appraiser: principal, value: uint, timestamp: uint }),
+    final-value: (optional uint)
+  }
+)
+(define-data-var next-appraisal-id uint u1)
+
+;; Initialize the protocol
+(define-public (initialize (treasury principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (var-set treasury-address treasury)
+    (var-set protocol-fee-percentage u200) ;; 2%
+    (var-set liquidation-threshold u8000) ;; 80%
+    (var-set min-loan-duration u144) ;; 1 day
+    (var-set max-loan-duration u52560) ;; 365 days
+    (var-set auction-duration u576) ;; 4 days
+    (var-set grace-period u144) ;; 1 day
+    
+    ;; Mint initial supply of lending tokens
+    (try! (ft-mint? lending-token u1000000000000 treasury))
+    
+    (ok true)
+  )
+)
+
+;; Register a new NFT collection
+(define-public (register-collection
+  (collection-id (string-ascii 32))
+  (nft-contract principal)
+  (base-uri (string-utf8 256))
+  (max-ltv uint)
+  (min-interest-rate uint)
+  (max-interest-rate uint)
+  (interest-rate-model (string-ascii 10))
+  (rarity-levels (list 10 (string-ascii 20)))
+  (min-value uint)
+  (max-value uint))
+  
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-none (map-get? collections { collection-id: collection-id })) err-collection-exists)
+    (asserts! (<= max-ltv u7500) err-invalid-parameter) ;; Max 75% LTV
+    (asserts! (< min-interest-rate max-interest-rate) err-invalid-parameter)
+    (asserts! (<= max-interest-rate u10000) err-invalid-parameter) ;; Max 100% interest
+    
+    (map-set collections
+      { collection-id: collection-id }
+      {
+        contract: nft-contract,
+        base-uri: base-uri,
+        max-ltv: max-ltv,
+        min-interest-rate: min-interest-rate,
+        max-interest-rate: max-interest-rate,
+        interest-rate-model: interest-rate-model,
+        rarity-levels: rarity-levels,
+        min-value: min-value,
+        max-value: max-value,
+        enabled: true
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Authorize an appraiser/oracle
+(define-public (authorize-appraiser (appraiser principal) (collections-list (list 20 (string-ascii 32))))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    
+    (map-set authorized-appraisers
+      { appraiser: appraiser }
+      {
+        authorized: true,
+        appraisal-count: u0,
+        collections: collections-list,
+        accuracy-score: u70, ;; Start with a neutral score
+        last-active: block-height
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+;; Request an appraisal for an NFT
+(define-public (request-appraisal (collection-id (string-ascii 32)) (token-id uint))
+  (let (
+    (request-id (var-get next-appraisal-id))
+    (collection (unwrap! (map-get? collections { collection-id: collection-id }) err-collection-not-found))
+  )
+    ;; Check that collection is enabled
+    (asserts! (get enabled collection) err-collection-not-found)
+    
+    ;; Create the appraisal request
+    (map-set appraisal-requests
+      { request-id: request-id }
+      {
+        collection-id: collection-id,
+        token-id: token-id,
+        requestor: tx-sender,
+        timestamp: block-height,
+        status: "pending",
+        appraisals: (list),
+        final-value: none
+      }
+    )
+    
+    ;; Increment the request ID
+    (var-set next-appraisal-id (+ request-id u1))
+    
+    (ok request-id)
+  )
+)
+
+;; Submit an appraisal (as an oracle)
+(define-public (submit-appraisal (request-id uint) (value uint))
+  (let (
+    (appraiser tx-sender)
+    (appraiser-info (unwrap! (map-get? authorized-appraisers { appraiser: appraiser }) err-not-authorized))
+    (request (unwrap! (map-get? appraisal-requests { request-id: request-id }) err-asset-not-found))
+    (collection-id (get collection-id request))
+  )
+    ;; Verify the appraiser is authorized
+    (asserts! (get authorized appraiser-info) err-not-authorized)
+    
+    ;; Verify appraiser is authorized for this collection
+    (asserts! (is-some (index-of (get collections appraiser-info) collection-id)) err-not-authorized)
+    
+    ;; Get collection info for validation
+    (let (
+      (collection (unwrap! (map-get? collections { collection-id: collection-id }) err-collection-not-found))
+      (min-value (get min-value collection))
+      (max-value (get max-value collection))
+    )
+      ;; Validate value is within reasonable range
+      (asserts! (and (>= value min-value) (<= value max-value)) err-invalid-appraisal)
+      
+      ;; Add appraisal to the request
+      (let (
+        (current-appraisals (get appraisals request))
+        (updated-appraisals (append current-appraisals {
+                               appraiser: appraiser,
+                               value: value,
+                               timestamp: block-height
+                             }))
+      )
+        (map-set appraisal-requests
+          { request-id: request-id }
+          (merge request {
+            appraisals: updated-appraisals
+          })
+        )
+        
+        ;; Update appraiser stats
+        (map-set authorized-appraisers
+          { appraiser: appraiser }
+          (merge appraiser-info {
+            appraisal-count: (+ (get appraisal-count appraiser-info) u1),
+            last-active: block-height
+          })
+        )
+        
+        ;; Check if we have enough appraisals to finalize
+        (if (>= (len updated-appraisals) (var-get oracle-consensus-threshold))
+          (finalize-appraisal request-id)
+          (ok { status: "pending", appraisals: (len updated-appraisals) })
+        )
+      )
+    )
+  )
+)
