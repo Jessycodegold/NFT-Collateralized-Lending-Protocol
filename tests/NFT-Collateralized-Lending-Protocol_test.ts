@@ -246,3 +246,132 @@
     )
   )
 )
+;; Test 8: Test auction bidding
+(print "Test 8: Test auction bidding")
+(let ((auction-id u1))
+  ;; 8.1 Place a bid
+  (print "8.1: Place a bid")
+  (let ((bid-result (contract-call? .nft-lending-protocol place-bid 
+                    auction-id
+                    u5000000  ;; 5M tokens
+                    )))
+    (asserts! (is-ok bid-result) (err "Failed to place bid"))
+    (print "✓ Bid placed successfully")
+    
+    ;; 8.2 Place a higher bid from another account
+    (print "8.2: Place a higher bid")
+    (let ((higher-bid-result (contract-call? .nft-lending-protocol place-bid 
+                            auction-id
+                            u5500000  ;; 5.5M tokens
+                            tx-sender test-address-2)))
+      (asserts! (is-ok higher-bid-result) (err "Failed to place higher bid"))
+      (print "✓ Higher bid placed successfully")
+      
+      ;; 8.3 Verify current highest bidder
+      (print "8.3: Verify highest bidder")
+      (let ((auction-details (contract-call? .nft-lending-protocol get-auction auction-id)))
+        (asserts! (is-ok auction-details) (err "Failed to get auction details"))
+        (let ((auction-data (unwrap-panic auction-details)))
+          (asserts! (is-eq (unwrap-panic (get current-bidder auction-data)) test-address-2) 
+                    (err "Highest bidder is incorrect"))
+          (asserts! (is-eq (get current-bid auction-data) u5500000) 
+                    (err "Highest bid amount is incorrect"))
+          (print "✓ Highest bidder verified correctly")
+        )
+      )
+    )
+  )
+)
+
+;; Test 9: Test auction settlement
+(print "Test 9: Test auction settlement")
+(let ((auction-id u1))
+  ;; 9.1 Force auction to end
+  (print "9.1: Force auction to end")
+  ;; This would typically be done by advancing the block height
+  ;; For our test, we'll use a force-end function if available
+  (let ((end-result (contract-call? .nft-lending-protocol force-end-auction auction-id)))
+    (asserts! (is-ok end-result) (err "Failed to end auction"))
+    (print "✓ Auction ended successfully")
+    
+    ;; 9.2 Settle auction
+    (print "9.2: Settle auction")
+    (let ((settle-result (contract-call? .nft-lending-protocol settle-auction auction-id)))
+      (asserts! (is-ok settle-result) (err "Failed to settle auction"))
+      (print "✓ Auction settled successfully")
+      
+      ;; 9.3 Verify auction state and NFT ownership
+      (print "9.3: Verify auction state and NFT ownership")
+      (let ((auction-details (contract-call? .nft-lending-protocol get-auction auction-id)))
+        (asserts! (is-ok auction-details) (err "Failed to get auction details"))
+        (let ((auction-data (unwrap-panic auction-details)))
+          (asserts! (is-eq (get state auction-data) u2) 
+                    (err "Auction state is not settled"))
+          (print "✓ Auction state verified as settled")
+          
+          ;; 9.4 Verify NFT ownership transferred to winning bidder
+          (print "9.4: Verify NFT ownership transferred")
+          (let ((nft-owner (contract-call? .nft-lending-protocol get-nft-owner
+                          "test-collection-1" u2)))
+            (asserts! (is-ok nft-owner) (err "Failed to get NFT owner"))
+            (asserts! (is-eq (unwrap-panic nft-owner) test-address-2) 
+                      (err "NFT ownership not transferred to winning bidder"))
+            (print "✓ NFT successfully transferred to winning bidder")
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Test 10: Emergency shutdown
+(print "Test 10: Test emergency shutdown")
+;; 10.1 Activate emergency shutdown
+(print "10.1: Activate emergency shutdown")
+(let ((result (contract-call? .nft-lending-protocol set-emergency-shutdown true)))
+  (asserts! (is-ok result) (err "Failed to activate emergency shutdown"))
+  (print "✓ Emergency shutdown activated successfully")
+  
+  ;; 10.2 Verify operations are restricted
+  (print "10.2: Verify operations are restricted")
+  (let ((loan-result (contract-call? .nft-lending-protocol apply-for-loan
+                     "test-collection-1"
+                     u3
+                     u5000000
+                     u1440)))
+    (asserts! (is-err loan-result) (err "Loan application should be restricted"))
+    (print "✓ Operations restricted successfully")
+    
+    ;; 10.3 Deactivate emergency shutdown
+    (print "10.3: Deactivate emergency shutdown")
+    (let ((deactivate-result (contract-call? .nft-lending-protocol set-emergency-shutdown false)))
+      (asserts! (is-ok deactivate-result) (err "Failed to deactivate emergency shutdown"))
+      (print "✓ Emergency shutdown deactivated successfully")
+      
+      ;; 10.4 Verify operations are restored
+      (print "10.4: Verify operations are restored")
+      (let ((loan-result (contract-call? .nft-lending-protocol apply-for-loan
+                         "test-collection-1"
+                         u3
+                         u5000000
+                         u1440)))
+        (asserts! (is-ok loan-result) (err "Loan application should be allowed again"))
+        (print "✓ Operations restored successfully")
+      )
+    )
+  )
+)
+
+;; Final test summary
+(print "==========================================")
+(print "All tests completed successfully!")
+(print "Test coverage:")
+(print "- Collection registration")
+(print "- Appraiser authorization")
+(print "- Appraisal workflow")
+(print "- Loan creation")
+(print "- Loan repayment (partial and full)")
+(print "- Liquidation process")
+(print "- Auction bidding and settlement")
+(print "- Emergency shutdown functionality")
+(print "==========================================")
