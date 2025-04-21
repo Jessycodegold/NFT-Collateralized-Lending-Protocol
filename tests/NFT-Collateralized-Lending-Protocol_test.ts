@@ -42,3 +42,207 @@
   (asserts! (is-ok result) (err "Failed to register collection"))
   (print "✓ Collection registered successfully")
 )
+;; Test 2: Authorize appraisers
+(print "Test 2: Authorize appraisers")
+(let ((result-1 (contract-call? .nft-lending-protocol authorize-appraiser
+                test-appraiser-1
+                (list "test-collection-1")))
+      (result-2 (contract-call? .nft-lending-protocol authorize-appraiser
+                test-appraiser-2
+                (list "test-collection-1")))
+      (result-3 (contract-call? .nft-lending-protocol authorize-appraiser
+                test-appraiser-3
+                (list "test-collection-1"))))
+  (asserts! (and (is-ok result-1) (is-ok result-2) (is-ok result-3)) 
+            (err "Failed to authorize appraisers"))
+  (print "✓ Appraisers authorized successfully")
+)
+
+;; Test 3: Test appraisal workflow
+(print "Test 3: Testing appraisal workflow")
+
+;; 3.1 Request an appraisal
+(print "3.1: Request an appraisal")
+(let ((result (as-contract (contract-call? .nft-lending-protocol request-appraisal
+                          "test-collection-1"
+                          u1))))
+  (asserts! (is-ok result) (err "Failed to request appraisal"))
+  (let ((request-id (unwrap-panic result)))
+    (print (concat "✓ Appraisal requested with ID: " (to-string request-id)))
+    
+    ;; 3.2 Submit appraisals from all appraisers
+    (print "3.2: Submit appraisals")
+    (let ((result-1 (contract-call? .nft-lending-protocol submit-appraisal request-id u10000000 tx-sender test-appraiser-1))
+          (result-2 (contract-call? .nft-lending-protocol submit-appraisal request-id u11000000 tx-sender test-appraiser-2))
+          (result-3 (contract-call? .nft-lending-protocol submit-appraisal request-id u12000000 tx-sender test-appraiser-3)))
+      (asserts! (and (is-ok result-1) (is-ok result-2) (is-ok result-3)) 
+                (err "Failed to submit appraisals"))
+      (print "✓ Appraisals submitted successfully")
+      
+      ;; 3.3 Check if appraisal was finalized
+      (print "3.3: Verify appraisal finalization")
+      (let ((appraisal-request (contract-call? .nft-lending-protocol get-appraisal-request request-id)))
+        (asserts! (is-ok appraisal-request) (err "Failed to get appraisal request"))
+        (let ((request-data (unwrap-panic appraisal-request)))
+          (asserts! (is-eq (get status request-data) "completed") 
+                    (err "Appraisal was not finalized"))
+          (asserts! (is-some (get final-value request-data)) 
+                    (err "Appraisal has no final value"))
+          (print (concat "✓ Appraisal finalized with value: " 
+                 (to-string (unwrap-panic (get final-value request-data)))))
+        )
+      )
+    )
+  )
+)
+
+;; Test 4: Apply for a loan
+(print "Test 4: Apply for a loan")
+(let ((result (contract-call? .nft-lending-protocol apply-for-loan
+              "test-collection-1"
+              u1
+              u5000000  ;; 5M tokens (50% of appraised value)
+              u1440     ;; 10 day duration (144 blocks per day)
+              )))
+  (asserts! (is-ok result) (err "Failed to apply for loan"))
+  (let ((loan-id (unwrap-panic result)))
+    (print (concat "✓ Loan created with ID: " (to-string loan-id)))
+    
+    ;; 4.1 Check loan details
+    (print "4.1: Verify loan details")
+    (let ((loan-details (contract-call? .nft-lending-protocol get-loan loan-id)))
+      (asserts! (is-ok loan-details) (err "Failed to get loan details"))
+      (let ((loan-data (unwrap-panic loan-details)))
+        (asserts! (is-eq (get state loan-data) u0) (err "Loan state is not active"))
+        (asserts! (is-eq (get borrower loan-data) tx-sender) 
+                  (err "Loan borrower doesn't match"))
+        (print (concat "✓ Loan verified with amount: " 
+               (to-string (get loan-amount loan-data))
+               " and interest rate: "
+               (to-string (get interest-rate loan-data))))
+      )
+    )
+  )
+)
+
+;; Test 5: Partial loan repayment
+(print "Test 5: Partial loan repayment")
+(let ((loan-id u1)
+      (repay-amount u1000000)) ;; 1M tokens
+  (let ((result (contract-call? .nft-lending-protocol repay-loan loan-id repay-amount)))
+    (asserts! (is-ok result) (err "Failed to repay loan"))
+    (print "✓ Partial repayment successful")
+    
+    ;; 5.1 Check updated loan details
+    (print "5.1: Verify updated loan details")
+    (let ((loan-details (contract-call? .nft-lending-protocol get-loan loan-id)))
+      (asserts! (is-ok loan-details) (err "Failed to get loan details"))
+      (let ((loan-data (unwrap-panic loan-details)))
+        (asserts! (> (get repaid-amount loan-data) u0) 
+                  (err "Repaid amount was not updated"))
+        (print (concat "✓ Loan updated with repaid amount: " 
+               (to-string (get repaid-amount loan-data))))
+      )
+    )
+  )
+)
+
+;; Test 6: Full loan repayment
+(print "Test 6: Full loan repayment")
+(let ((loan-id u1))
+  (let ((loan-details (contract-call? .nft-lending-protocol get-loan loan-id)))
+    (asserts! (is-ok loan-details) (err "Failed to get loan details"))
+    (let ((loan-data (unwrap-panic loan-details))
+          (remaining (get remaining-amount loan-data)))
+      (let ((result (contract-call? .nft-lending-protocol repay-loan loan-id remaining)))
+        (asserts! (is-ok result) (err "Failed to repay loan fully"))
+        (print "✓ Full repayment successful")
+        
+        ;; 6.1 Check loan is marked as repaid
+        (print "6.1: Verify loan is marked as repaid")
+        (let ((updated-loan (contract-call? .nft-lending-protocol get-loan loan-id)))
+          (asserts! (is-ok updated-loan) (err "Failed to get updated loan details"))
+          (let ((updated-data (unwrap-panic updated-loan)))
+            (asserts! (is-eq (get state updated-data) u1) 
+                      (err "Loan state is not marked as repaid"))
+            (print "✓ Loan successfully marked as repaid")
+            
+            ;; 6.2 Verify NFT has been returned to borrower
+            (print "6.2: Verify NFT returned to borrower")
+            (let ((collateral-owner (contract-call? .nft-lending-protocol get-nft-owner
+                                    "test-collection-1" u1)))
+              (asserts! (is-ok collateral-owner) (err "Failed to get collateral owner"))
+              (asserts! (is-eq (unwrap-panic collateral-owner) tx-sender) 
+                        (err "NFT was not returned to borrower"))
+              (print "✓ NFT successfully returned to borrower")
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+;; Test 7: Test liquidation trigger
+(print "Test 7: Test liquidation trigger")
+;; First create a new loan with high LTV
+(let ((result (contract-call? .nft-lending-protocol apply-for-loan
+              "test-collection-1"
+              u2  ;; Different NFT
+              u6000000  ;; 6M tokens (60% of appraised value)
+              u1440     ;; 10 day duration
+              )))
+  (asserts! (is-ok result) (err "Failed to create loan for liquidation test"))
+  (let ((loan-id (unwrap-panic result)))
+    (print (concat "✓ Created loan ID " (to-string loan-id) " for liquidation test"))
+    
+    ;; 7.1 Force decrease in collateral value
+    (print "7.1: Force decrease in collateral value")
+    (let ((request-result (as-contract (contract-call? .nft-lending-protocol request-appraisal
+                                      "test-collection-1" u2))))
+      (asserts! (is-ok request-result) (err "Failed to request reappraisal"))
+      (let ((request-id (unwrap-panic request-result)))
+        ;; Submit much lower appraisals to trigger liquidation
+        (let ((result-1 (contract-call? .nft-lending-protocol submit-appraisal request-id u7000000 tx-sender test-appraiser-1))
+              (result-2 (contract-call? .nft-lending-protocol submit-appraisal request-id u7100000 tx-sender test-appraiser-2))
+              (result-3 (contract-call? .nft-lending-protocol submit-appraisal request-id u7200000 tx-sender test-appraiser-3)))
+          (asserts! (and (is-ok result-1) (is-ok result-2) (is-ok result-3)) 
+                    (err "Failed to submit lower appraisals"))
+          (print "✓ Submitted lower appraisals to trigger liquidation")
+          
+          ;; 7.2 Check if loan is liquidatable
+          (print "7.2: Check if loan is liquidatable")
+          (let ((check-result (contract-call? .nft-lending-protocol check-liquidation-status loan-id)))
+            (asserts! (is-ok check-result) (err "Failed to check liquidation status"))
+            (let ((status (unwrap-panic check-result)))
+              (asserts! status (err "Loan is not marked as liquidatable"))
+              (print "✓ Loan is correctly marked as liquidatable")
+              
+              ;; 7.3 Trigger liquidation
+              (print "7.3: Trigger liquidation")
+              (let ((liquidate-result (contract-call? .nft-lending-protocol liquidate-loan loan-id)))
+                (asserts! (is-ok liquidate-result) (err "Failed to liquidate loan"))
+                (let ((auction-id (unwrap-panic liquidate-result)))
+                  (print (concat "✓ Loan liquidated with auction ID: " (to-string auction-id)))
+                  
+                  ;; 7.4 Check auction details
+                  (print "7.4: Verify auction details")
+                  (let ((auction-details (contract-call? .nft-lending-protocol get-auction auction-id)))
+                    (asserts! (is-ok auction-details) (err "Failed to get auction details"))
+                    (let ((auction-data (unwrap-panic auction-details)))
+                      (asserts! (is-eq (get state auction-data) u0) 
+                                (err "Auction state is not active"))
+                      (asserts! (is-eq (get loan-id auction-data) loan-id) 
+                                (err "Auction loan ID doesn't match"))
+                      (print "✓ Auction verified and is active")
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
